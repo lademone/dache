@@ -35,6 +35,8 @@ namespace Dache.Client
         // The logger
         private readonly ILogger _logger = null;
 
+        private readonly bool _directHost;
+
         /// <summary>
         /// The constructor that derives configuration from file.
         /// </summary>
@@ -61,56 +63,66 @@ namespace Dache.Client
             // Configure custom serializer
             _binarySerializer = CustomTypesLoader.LoadSerializer(configuration);
 
-            // Get the cache hosts from configuration
-            var cacheHosts = configuration.CacheHosts;
+            _directHost = configuration.DirectHost;
 
-            // Sanitize
-            if (cacheHosts == null)
+            if (_directHost)
             {
-                throw new ConfigurationErrorsException("At least one cache host must be specified in your application's configuration.");
+                if (DirectHost.Instance == null)
+                    throw new ConfigurationErrorsException("No host detected");
             }
-
-            // Get the host redundancy layers from configuration
-            var hostRedundancyLayers = configuration.HostRedundancyLayers;
-            CacheHostBucket currentCacheHostBucket = new CacheHostBucket();
-
-            // Assign the cache hosts to buckets in a specified order
-            foreach (CacheHostElement cacheHost in cacheHosts.OfType<CacheHostElement>().OrderBy(i => i.Address).ThenBy(i => i.Port))
+            else
             {
-                // Instantiate a communication client
-                var communicationClient = new CommunicationClient(cacheHost.Address, cacheHost.Port, configuration.HostReconnectIntervalSeconds * 1000, 
-                    configuration.MessageBufferSize, configuration.CommunicationTimeoutSeconds * 1000, configuration.MaximumMessageSizeKB * 1024);
+                // Get the cache hosts from configuration
+                var cacheHosts = configuration.CacheHosts;
 
-                // Hook up the disconnected and reconnected events
-                communicationClient.Disconnected += OnClientDisconnected;
-                communicationClient.Reconnected += OnClientReconnected;
+                // Sanitize
+                if (cacheHosts == null)
+                {
+                    throw new ConfigurationErrorsException("At least one cache host must be specified in your application's configuration.");
+                }
 
-                // Hook up the message receive event
-                communicationClient.MessageReceived += ReceiveMessage;
+                // Get the host redundancy layers from configuration
+                var hostRedundancyLayers = configuration.HostRedundancyLayers;
+                CacheHostBucket currentCacheHostBucket = new CacheHostBucket();
 
-                // Add to cache host bucket
-                currentCacheHostBucket.AddCacheHost(communicationClient);
+                // Assign the cache hosts to buckets in a specified order
+                foreach (CacheHostElement cacheHost in cacheHosts.OfType<CacheHostElement>().OrderBy(i => i.Address).ThenBy(i => i.Port))
+                {
+                    // Instantiate a communication client
+                    var communicationClient = new CommunicationClient(cacheHost.Address, cacheHost.Port, configuration.HostReconnectIntervalSeconds * 1000,
+                        configuration.MessageBufferSize, configuration.CommunicationTimeoutSeconds * 1000, configuration.MaximumMessageSizeKB * 1024);
 
-                // check if done with bucket
-                if (currentCacheHostBucket.Count == hostRedundancyLayers + 1)
+                    // Hook up the disconnected and reconnected events
+                    communicationClient.Disconnected += OnClientDisconnected;
+                    communicationClient.Reconnected += OnClientReconnected;
+
+                    // Hook up the message receive event
+                    communicationClient.MessageReceived += ReceiveMessage;
+
+                    // Add to cache host bucket
+                    currentCacheHostBucket.AddCacheHost(communicationClient);
+
+                    // check if done with bucket
+                    if (currentCacheHostBucket.Count == hostRedundancyLayers + 1)
+                    {
+                        _cacheHostBuckets.Add(currentCacheHostBucket);
+                        currentCacheHostBucket = new CacheHostBucket();
+                    }
+                }
+
+                // Final safety check for uneven cache host distributions
+                if (currentCacheHostBucket.Count > 0)
                 {
                     _cacheHostBuckets.Add(currentCacheHostBucket);
-                    currentCacheHostBucket = new CacheHostBucket();
                 }
-            }
 
-            // Final safety check for uneven cache host distributions
-            if (currentCacheHostBucket.Count > 0)
-            {
-                _cacheHostBuckets.Add(currentCacheHostBucket);
-            }
+                _logger.Info("Cache Host Assignment", string.Format("Assigned {0} cache hosts to {1} cache host buckets ({2} per bucket)", cacheHosts.Count, _cacheHostBuckets.Count, hostRedundancyLayers + 1));
 
-            _logger.Info("Cache Host Assignment", string.Format("Assigned {0} cache hosts to {1} cache host buckets ({2} per bucket)", cacheHosts.Count, _cacheHostBuckets.Count, hostRedundancyLayers + 1));
-
-            // Now attempt to connect to each host
-            foreach (var cacheHostBucket in _cacheHostBuckets)
-            {
-                cacheHostBucket.PerformActionOnAll(c => c.Connect());
+                // Now attempt to connect to each host
+                foreach (var cacheHostBucket in _cacheHostBuckets)
+                {
+                    cacheHostBucket.PerformActionOnAll(c => c.Connect());
+                }
             }
         }
 
@@ -132,20 +144,27 @@ namespace Dache.Client
             // Do remote work
             List<byte[]> rawValues = null;
 
-            do
+            if (_directHost)
             {
-                var cacheHostBucket = DetermineBucket(cacheKey);
+                rawValues = DirectHost.Instance.Get(new[] { cacheKey });
+            }
+            else
+            {
+                do
+                {
+                    var cacheHostBucket = DetermineBucket(cacheKey);
 
-                try
-                {
-                    rawValues = cacheHostBucket.GetNext().Get(new[] { cacheKey });
-                    break;
-                }
-                catch
-                {
-                    // Try a different cache host if this one could not be reached
-                }
-            } while (true);
+                    try
+                    {
+                        rawValues = cacheHostBucket.GetNext().Get(new[] { cacheKey });
+                        break;
+                    }
+                    catch
+                    {
+                        // Try a different cache host if this one could not be reached
+                    }
+                } while (true);
+            }
 
             // If we got nothing back, return false and the default value for the type;
             if (rawValues == null || rawValues.Count == 0)
@@ -191,51 +210,58 @@ namespace Dache.Client
             // Do remote work
             List<byte[]> rawResults = null;
 
-            do
+            if (_directHost)
             {
-                // Need to batch up requests
-                var routingDictionary = new Dictionary<CacheHostBucket, List<string>>(_cacheHostBuckets.Count);
-                List<string> clientCacheKeys = null;
-                foreach (var cacheKey in cacheKeys)
+                rawResults = DirectHost.Instance.Get(cacheKeys);
+            }
+            else
+            {
+                do
                 {
-                    // Get the cache host bucket
-                    var cacheHostBucket = DetermineBucket(cacheKey);
-                    if (!routingDictionary.TryGetValue(cacheHostBucket, out clientCacheKeys))
+                    // Need to batch up requests
+                    var routingDictionary = new Dictionary<CacheHostBucket, List<string>>(_cacheHostBuckets.Count);
+                    List<string> clientCacheKeys = null;
+                    foreach (var cacheKey in cacheKeys)
                     {
-                        clientCacheKeys = new List<string>(10);
-                        routingDictionary.Add(cacheHostBucket, clientCacheKeys);
-                    }
-
-                    clientCacheKeys.Add(cacheKey);
-                }
-
-                try
-                {
-                    // Now we've batched them, do the work
-                    rawResults = null;
-                    foreach (var routingDictionaryEntry in routingDictionary)
-                    {
-                        var getResults = routingDictionaryEntry.Key.GetNext().Get(routingDictionaryEntry.Value);
-                        if (getResults != null)
+                        // Get the cache host bucket
+                        var cacheHostBucket = DetermineBucket(cacheKey);
+                        if (!routingDictionary.TryGetValue(cacheHostBucket, out clientCacheKeys))
                         {
-                            if (rawResults == null)
-                            {
-                                rawResults = getResults;
-                                continue;
-                            }
-
-                            rawResults.AddRange(getResults);
+                            clientCacheKeys = new List<string>(10);
+                            routingDictionary.Add(cacheHostBucket, clientCacheKeys);
                         }
+
+                        clientCacheKeys.Add(cacheKey);
                     }
 
-                    // If we got here we did all of the work successfully
-                    break;
-                }
-                catch
-                {
-                    // Rebalance and try again if a cache host could not be reached
-                }
-            } while (true);
+                    try
+                    {
+                        // Now we've batched them, do the work
+                        rawResults = null;
+                        foreach (var routingDictionaryEntry in routingDictionary)
+                        {
+                            var getResults = routingDictionaryEntry.Key.GetNext().Get(routingDictionaryEntry.Value);
+                            if (getResults != null)
+                            {
+                                if (rawResults == null)
+                                {
+                                    rawResults = getResults;
+                                    continue;
+                                }
+
+                                rawResults.AddRange(getResults);
+                            }
+                        }
+
+                        // If we got here we did all of the work successfully
+                        break;
+                    }
+                    catch
+                    {
+                        // Rebalance and try again if a cache host could not be reached
+                    }
+                } while (true);
+            }
 
             // If we got nothing back, return null
             if (rawResults == null)
@@ -358,21 +384,28 @@ namespace Dache.Client
                 throw new SerializationException("value could not be serialized.", ex);
             }
 
-            do
+            if (_directHost)
             {
-                // Get the cache host bucket - use tagName if specified
-                var cacheHostBucket = DetermineBucket(tagName != null ? tagName : cacheKey);
+                DirectHost.Instance.AddOrUpdate(new[] { new KeyValuePair<string, byte[]>(cacheKey, bytes) }, tagName: tagName, absoluteExpiration: absoluteExpiration, slidingExpiration: slidingExpiration, notifyRemoved: notifyRemoved, isInterned: isInterned);
+            }
+            else
+            {
+                do
+                {
+                    // Get the cache host bucket - use tagName if specified
+                    var cacheHostBucket = DetermineBucket(tagName != null ? tagName : cacheKey);
 
-                try
-                {
-                    cacheHostBucket.PerformActionOnAll(c => c.AddOrUpdate(new[] { new KeyValuePair<string, byte[]>(cacheKey, bytes) }, tagName: tagName, absoluteExpiration: absoluteExpiration, slidingExpiration: slidingExpiration, notifyRemoved: notifyRemoved, isInterned: isInterned));
-                    break;
-                }
-                catch
-                {
-                    // Try a different cache host if this one could not be reached
-                }
-            } while (true);
+                    try
+                    {
+                        cacheHostBucket.PerformActionOnAll(c => c.AddOrUpdate(new[] { new KeyValuePair<string, byte[]>(cacheKey, bytes) }, tagName: tagName, absoluteExpiration: absoluteExpiration, slidingExpiration: slidingExpiration, notifyRemoved: notifyRemoved, isInterned: isInterned));
+                        break;
+                    }
+                    catch
+                    {
+                        // Try a different cache host if this one could not be reached
+                    }
+                } while (true);
+            }
         }
 
         /// <summary>
@@ -398,8 +431,14 @@ namespace Dache.Client
                 throw new ArgumentException("must have at least one element", "cacheKeysAndObjects");
             }
 
-            var routingDictionary = new Dictionary<CacheHostBucket, List<KeyValuePair<string, byte[]>>>(_cacheHostBuckets.Count);
             List<KeyValuePair<string, byte[]>> clientCacheKeysAndObjects = null;
+            Dictionary<CacheHostBucket, List<KeyValuePair<string, byte[]>>> routingDictionary = null;
+
+            if (_directHost)
+                clientCacheKeysAndObjects = new List<KeyValuePair<string, byte[]>>();
+            else
+                routingDictionary = new Dictionary<CacheHostBucket, List<KeyValuePair<string, byte[]>>>(_cacheHostBuckets.Count);
+            
             byte[] bytes = null;
             var useTagName = tagName != null;
 
@@ -419,13 +458,17 @@ namespace Dache.Client
                         continue;
                     }
 
-                    // Get the cache host bucket - use tagName if specified
-                    var cacheHostBucket = DetermineBucket(useTagName ? tagName : cacheKeyAndObjectKvp.Key);
-                    if (!routingDictionary.TryGetValue(cacheHostBucket, out clientCacheKeysAndObjects))
+                    if (!_directHost)
                     {
-                        clientCacheKeysAndObjects = new List<KeyValuePair<string, byte[]>>(10);
-                        routingDictionary.Add(cacheHostBucket, clientCacheKeysAndObjects);
+                        // Get the cache host bucket - use tagName if specified
+                        var cacheHostBucket = DetermineBucket(useTagName ? tagName : cacheKeyAndObjectKvp.Key);
+                        if (!routingDictionary.TryGetValue(cacheHostBucket, out clientCacheKeysAndObjects))
+                        {
+                            clientCacheKeysAndObjects = new List<KeyValuePair<string, byte[]>>(10);
+                            routingDictionary.Add(cacheHostBucket, clientCacheKeysAndObjects);
+                        }
                     }
+                    
 
                     clientCacheKeysAndObjects.Add(new KeyValuePair<string, byte[]>(cacheKeyAndObjectKvp.Key, bytes));
                 }
@@ -436,19 +479,27 @@ namespace Dache.Client
                     return;
                 }
 
-                try
+                if (_directHost)
                 {
-                    foreach (var routingDictionaryEntry in routingDictionary)
-                    {
-                        routingDictionaryEntry.Key.PerformActionOnAll(c => c.AddOrUpdate(routingDictionaryEntry.Value, tagName: tagName, absoluteExpiration: absoluteExpiration, slidingExpiration: slidingExpiration, notifyRemoved: notifyRemoved, isInterned: isInterned));
-                    }
-
-                    // If we got here we did all of the work successfully
+                    DirectHost.Instance.AddOrUpdate(clientCacheKeysAndObjects, tagName: tagName, absoluteExpiration: absoluteExpiration, slidingExpiration: slidingExpiration, notifyRemoved: notifyRemoved, isInterned: isInterned);
                     break;
                 }
-                catch
+                else
                 {
-                    // Rebalance and try again if a cache host could not be reached
+                    try
+                    {
+                        foreach (var routingDictionaryEntry in routingDictionary)
+                        {
+                            routingDictionaryEntry.Key.PerformActionOnAll(c => c.AddOrUpdate(routingDictionaryEntry.Value, tagName: tagName, absoluteExpiration: absoluteExpiration, slidingExpiration: slidingExpiration, notifyRemoved: notifyRemoved, isInterned: isInterned));
+                        }
+
+                        // If we got here we did all of the work successfully
+                        break;
+                    }
+                    catch
+                    {
+                        // Rebalance and try again if a cache host could not be reached
+                    }
                 }
             } while (true);
         }
@@ -465,20 +516,27 @@ namespace Dache.Client
                 throw new ArgumentException("cannot be null, empty, or white space", "cacheKey");
             }
 
-            do
+            if (_directHost)
             {
-                var cacheHostBucket = DetermineBucket(cacheKey);
+                DirectHost.Instance.Remove(new[] { cacheKey });
+            }
+            else
+            {
+                do
+                {
+                    var cacheHostBucket = DetermineBucket(cacheKey);
 
-                try
-                {
-                    cacheHostBucket.PerformActionOnAll(c => c.Remove(new[] { cacheKey }));
-                    break;
-                }
-                catch
-                {
-                    // Try a different cache host if this one could not be reached
-                }
-            } while (true);
+                    try
+                    {
+                        cacheHostBucket.PerformActionOnAll(c => c.Remove(new[] { cacheKey }));
+                        break;
+                    }
+                    catch
+                    {
+                        // Try a different cache host if this one could not be reached
+                    }
+                } while (true);
+            }
         }
 
         /// <summary>
@@ -497,40 +555,47 @@ namespace Dache.Client
                 throw new ArgumentException("must have at least one element", "cacheKeys");
             }
 
-            do
+            if (_directHost)
             {
-                // Need to batch up requests
-                var routingDictionary = new Dictionary<CacheHostBucket, List<string>>(_cacheHostBuckets.Count);
-                List<string> clientCacheKeys = null;
-                foreach (var cacheKey in cacheKeys)
+                DirectHost.Instance.Remove(cacheKeys);
+            }
+            else
+            {
+                do
                 {
-                    // Get the cache host bucket
-                    var cacheHostBucket = DetermineBucket(cacheKey);
-                    if (!routingDictionary.TryGetValue(cacheHostBucket, out clientCacheKeys))
+                    // Need to batch up requests
+                    var routingDictionary = new Dictionary<CacheHostBucket, List<string>>(_cacheHostBuckets.Count);
+                    List<string> clientCacheKeys = null;
+                    foreach (var cacheKey in cacheKeys)
                     {
-                        clientCacheKeys = new List<string>(10);
-                        routingDictionary.Add(cacheHostBucket, clientCacheKeys);
+                        // Get the cache host bucket
+                        var cacheHostBucket = DetermineBucket(cacheKey);
+                        if (!routingDictionary.TryGetValue(cacheHostBucket, out clientCacheKeys))
+                        {
+                            clientCacheKeys = new List<string>(10);
+                            routingDictionary.Add(cacheHostBucket, clientCacheKeys);
+                        }
+
+                        clientCacheKeys.Add(cacheKey);
                     }
 
-                    clientCacheKeys.Add(cacheKey);
-                }
-
-                try
-                {
-                    // Now we've batched them, do the work
-                    foreach (var routingDictionaryEntry in routingDictionary)
+                    try
                     {
-                        routingDictionaryEntry.Key.PerformActionOnAll(c => c.Remove(routingDictionaryEntry.Value));
-                    }
+                        // Now we've batched them, do the work
+                        foreach (var routingDictionaryEntry in routingDictionary)
+                        {
+                            routingDictionaryEntry.Key.PerformActionOnAll(c => c.Remove(routingDictionaryEntry.Value));
+                        }
 
-                    // If we got here we did all of the work successfully
-                    break;
-                }
-                catch
-                {
-                    // Rebalance and try again if a cache host could not be reached
-                }
-            } while (true);
+                        // If we got here we did all of the work successfully
+                        break;
+                    }
+                    catch
+                    {
+                        // Rebalance and try again if a cache host could not be reached
+                    }
+                } while (true);
+            }
         }
 
         /// <summary>
@@ -551,20 +616,27 @@ namespace Dache.Client
                 throw new ArgumentException("cannot be null, empty, or white space", "pattern");
             }
 
-            do
+            if (_directHost)
             {
-                var cacheHostBucket = DetermineBucket(tagName);
+                DirectHost.Instance.RemoveTagged(new[] { tagName }, pattern);
+            }
+            else
+            {
+                do
+                {
+                    var cacheHostBucket = DetermineBucket(tagName);
 
-                try
-                {
-                    cacheHostBucket.PerformActionOnAll(c => c.RemoveTagged(new[] { tagName }, pattern));
-                    break;
-                }
-                catch
-                {
-                    // Try a different cache host if this one could not be reached
-                }
-            } while (true);
+                    try
+                    {
+                        cacheHostBucket.PerformActionOnAll(c => c.RemoveTagged(new[] { tagName }, pattern));
+                        break;
+                    }
+                    catch
+                    {
+                        // Try a different cache host if this one could not be reached
+                    }
+                } while (true);
+            }
         }
 
         /// <summary>
@@ -589,40 +661,47 @@ namespace Dache.Client
                 throw new ArgumentException("cannot be null, empty, or white space", "pattern");
             }
 
-            do
+            if (_directHost)
             {
-                // Need to batch up requests
-                var routingDictionary = new Dictionary<CacheHostBucket, List<string>>(_cacheHostBuckets.Count);
-                List<string> clientTagNames = null;
-                foreach (var tagName in tagNames)
+                DirectHost.Instance.RemoveTagged(tagNames, pattern);
+            }
+            else
+            {
+                do
                 {
-                    // Get the cache host bucket
-                    var cacheHostBucket = DetermineBucket(tagName);
-                    if (!routingDictionary.TryGetValue(cacheHostBucket, out clientTagNames))
+                    // Need to batch up requests
+                    var routingDictionary = new Dictionary<CacheHostBucket, List<string>>(_cacheHostBuckets.Count);
+                    List<string> clientTagNames = null;
+                    foreach (var tagName in tagNames)
                     {
-                        clientTagNames = new List<string>(10);
-                        routingDictionary.Add(cacheHostBucket, clientTagNames);
+                        // Get the cache host bucket
+                        var cacheHostBucket = DetermineBucket(tagName);
+                        if (!routingDictionary.TryGetValue(cacheHostBucket, out clientTagNames))
+                        {
+                            clientTagNames = new List<string>(10);
+                            routingDictionary.Add(cacheHostBucket, clientTagNames);
+                        }
+
+                        clientTagNames.Add(tagName);
                     }
 
-                    clientTagNames.Add(tagName);
-                }
-
-                try
-                {
-                    // Now we've batched them, do the work
-                    foreach (var routingDictionaryEntry in routingDictionary)
+                    try
                     {
-                        routingDictionaryEntry.Key.PerformActionOnAll(c => c.RemoveTagged(routingDictionaryEntry.Value, pattern));
-                    }
+                        // Now we've batched them, do the work
+                        foreach (var routingDictionaryEntry in routingDictionary)
+                        {
+                            routingDictionaryEntry.Key.PerformActionOnAll(c => c.RemoveTagged(routingDictionaryEntry.Value, pattern));
+                        }
 
-                    // If we got here we did all of the work successfully
-                    break;
-                }
-                catch
-                {
-                    // Rebalance and try again if a cache host could not be reached
-                }
-            } while (true);
+                        // If we got here we did all of the work successfully
+                        break;
+                    }
+                    catch
+                    {
+                        // Rebalance and try again if a cache host could not be reached
+                    }
+                } while (true);
+            }
         }
 
         /// <summary>
@@ -637,6 +716,9 @@ namespace Dache.Client
             {
                 throw new ArgumentException("cannot be null, empty, or white space", "pattern");
             }
+
+            if (_directHost)
+                return DirectHost.Instance.GetCacheKeys(pattern);
 
             do
             {
@@ -694,6 +776,8 @@ namespace Dache.Client
             {
                 throw new ArgumentException("cannot be null, empty, or white space", "pattern");
             }
+            if (_directHost)
+                return DirectHost.Instance.GetCacheKeysTagged(new[] { tagName }, pattern);
 
             do
             {
@@ -740,6 +824,8 @@ namespace Dache.Client
             {
                 throw new ArgumentException("cannot be null, empty, or white space", "pattern");
             }
+            if (_directHost)
+                return DirectHost.Instance.GetCacheKeysTagged(tagNames, pattern);
 
             do
             {
@@ -824,24 +910,27 @@ namespace Dache.Client
         /// </summary>
         public void Shutdown()
         {
-            do
+            if (!_directHost)
             {
-                // Enumerate all cache hosts
-                try
+                do
                 {
-                    foreach (var cacheHostBucket in _cacheHostBuckets)
+                    // Enumerate all cache hosts
+                    try
                     {
-                        cacheHostBucket.PerformActionOnAll(c => c.Disconnect());
-                    }
+                        foreach (var cacheHostBucket in _cacheHostBuckets)
+                        {
+                            cacheHostBucket.PerformActionOnAll(c => c.Disconnect());
+                        }
 
-                    // If we got here we succeeded
-                    break;
-                }
-                catch
-                {
-                    // Rebalance and try again if a cache host could not be reached or the list changed
-                }
-            } while (true);
+                        // If we got here we succeeded
+                        break;
+                    }
+                    catch
+                    {
+                        // Rebalance and try again if a cache host could not be reached or the list changed
+                    }
+                } while (true);
+            }
         }
 
         /// <summary>

@@ -41,6 +41,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Communication\DacheProtocolHelper.cs" />
+    <Compile Include="Communication\DirectHost.cs" />
     <Compile Include="Comparers\GenericComparer.cs" />
     <Compile Include="Communication\ICacheHostContract.cs" />
     <Compile Include="Logging\EventViewerLogger.cs" />

@@ -24,6 +24,22 @@ namespace Dache.Client.Configuration
         }
 
         /// <summary>
+        /// Not use socket, directly access the host instance (in process only)
+        /// </summary>
+        [ConfigurationProperty("DirectHost", IsRequired = false, DefaultValue = false)]
+        public bool DirectHost
+        {
+            get
+            {
+                return (bool)this["DirectHost"];
+            }
+            set
+            {
+                this["DirectHost"] = value;
+            }
+        }
+
+        /// <summary>
         /// How often to attempt to re-establish the connection to a disconnected cache host, in seconds. The default is 5. Valid range is &gt;= 5.
         /// </summary>
         [IntegerValidator(MinValue = 5, MaxValue = int.MaxValue)]

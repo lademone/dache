@@ -1,3 +1,13 @@
+Features of this fork
+---------------
+
+### New Features
+## Direct host communication
+When use Dache in the same process with not external communication (client), set the DirectHost to TRUE for a major boost of performance (52% to 79%). This setting drop the socket communication layer and use directly the host engine.
+
+## PowerJSON
+It's just a replacement of Newtonsoft JSON for [PowerJSON](http://github.com/wmjordan/PowerJSON)
+
 # DACHE
 
 Distributed caching for .NET applications 

@@ -1,8 +1,5 @@
 ﻿using Dache.Core.Communication;
-using Newtonsoft.Json;
-using ProtoBuf;
-using System.IO;
-using System.Runtime.Serialization.Formatters.Binary;
+using fastJSON;
 
 namespace Dache.Client.Serialization
 {
@@ -25,7 +22,7 @@ namespace Dache.Client.Serialization
                 return null;
             }
 
-            var json = JsonConvert.SerializeObject(value);
+            var json = JSON.ToJSON(value);
             return DacheProtocolHelper.CommunicationEncoding.GetBytes(json);
         }
 
@@ -44,7 +41,7 @@ namespace Dache.Client.Serialization
             }
 
             var json = DacheProtocolHelper.CommunicationEncoding.GetString(bytes);
-            return JsonConvert.DeserializeObject<T>(json);
+            return JSON.ToObject<T>(json);
         }
     }
 }

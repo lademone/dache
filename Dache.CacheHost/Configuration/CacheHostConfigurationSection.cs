@@ -25,6 +25,23 @@ namespace Dache.CacheHost.Configuration
         }
 
         /// <summary>
+        /// Not use socket, directly access the host instance (in process only)
+        /// </summary>
+        [ConfigurationProperty("DirectHost", IsRequired = false, DefaultValue = false)]
+        public bool DirectHost
+        {
+            get
+            {
+
+                return (bool)this["DirectHost"];
+            }
+            set
+            {
+                this["DirectHost"] = value;
+            }
+        }
+
+        /// <summary>
         /// The custom logger.
         /// </summary>
         [ConfigurationProperty("customLogger", IsRequired = false)]

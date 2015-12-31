@@ -3,6 +3,7 @@ using Dache.CacheHost.Communication;
 using Dache.CacheHost.Configuration;
 using Dache.CacheHost.Routing;
 using Dache.CacheHost.Storage;
+using Dache.Core.Communication;
 using Dache.Core.Logging;
 using Dache.Core.Performance;
 
@@ -69,9 +70,23 @@ namespace Dache.CacheHost
             // Initialize the tag routing table
             var tagRoutingTable = new TagRoutingTable();
 
-            // Initialize the cache host server
-            var cacheHostServer = new CacheHostServer(memCache, tagRoutingTable, CustomLoggerLoader.LoadLogger(), configuration.Port, 
-                configuration.MaximumConnections, configuration.MessageBufferSize, configuration.CommunicationTimeoutSeconds * 1000, configuration.MaximumMessageSizeKB * 1024);
+            CacheHostServer cacheHostServer;
+
+            if (configuration.DirectHost)
+            {
+                // Initialize the cache host server
+                //var hostInstance = new DirectCacheHostServer(memCache, tagRoutingTable, CustomLoggerLoader.LoadLogger()); ;
+                //DirectHost.Instance = hostInstance;
+
+                cacheHostServer = new CacheHostServer(memCache, CustomLoggerLoader.LoadLogger());
+                DirectHost.Instance = cacheHostServer;
+            }
+            else
+            {
+                // Initialize the cache host server
+                cacheHostServer = new CacheHostServer(memCache, tagRoutingTable, CustomLoggerLoader.LoadLogger(), configuration.Port,
+                    configuration.MaximumConnections, configuration.MessageBufferSize, configuration.CommunicationTimeoutSeconds * 1000, configuration.MaximumMessageSizeKB * 1024);
+            }
 
             // Instantiate the cache host runner
             _cacheHostRunner = new CacheHostRunner(cacheHostServer);

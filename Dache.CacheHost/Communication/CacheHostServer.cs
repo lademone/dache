@@ -43,6 +43,29 @@ namespace Dache.CacheHost.Communication
         // The invalid command result
         private static readonly byte[] _noResults = new byte[] { 0 };
 
+        public CacheHostServer(IMemCache memCache, ILogger logger)
+        {
+            // Sanitize
+            if (memCache == null)
+            {
+                throw new ArgumentNullException("memCache");
+            }
+
+            if (logger == null)
+            {
+                throw new ArgumentNullException("logger");
+            }
+
+            // Set the default cache item policies
+            _defaultCacheItemPolicy = new CacheItemPolicy();
+            _defaultRemovedCallbackCacheItemPolicy = new CacheItemPolicy { RemovedCallback = CacheItemRemoved };
+
+            // Set the mem cache
+            _memCache = memCache;
+            // Set the logger
+            _logger = logger;
+        }
+
         /// <summary>
         /// The constructor.
         /// </summary>
@@ -422,8 +445,9 @@ namespace Dache.CacheHost.Communication
         /// </summary>
         public void Start()
         {
-            // Listen for connections
-            _server.Listen(_localEndPoint);
+            if (_server != null)
+                // Listen for connections
+                _server.Listen(_localEndPoint);
         }
 
         /// <summary>
@@ -431,8 +455,9 @@ namespace Dache.CacheHost.Communication
         /// </summary>
         public void Stop()
         {
-            // Shutdown and close the server socket
-            _server.Close();
+            if (_server != null)
+                // Shutdown and close the server socket
+                _server.Close();
         }
 
         /// <summary>
